@@ -8,7 +8,6 @@ Config saved to tflx_watcher_config.json next to this script.
 
 import sys
 import json
-import queue
 import shutil
 import threading
 import tkinter as tk
@@ -53,21 +52,48 @@ def save_config(cfg: dict):
 
 # ── Watchdog handler ──────────────────────────────────────────────────────────
 
+VERSION = "v12"
+
 class TFLXHandler(FileSystemEventHandler):
-    def __init__(self, file_queue):
+    """
+    Posts directly to the Tkinter main thread via root.after(0, ...) —
+    which IS thread-safe in Tkinter.  No queue, no polling loop.
+    Multiple events for the same file are debounced: only the last event
+    within COPY_SETTLE_DELAY fires, so at most one _try_show call per file.
+    WatcherApp._try_show deduplicates via _shown as a second safety net.
+    """
+    def __init__(self, root, try_show_fn):
         super().__init__()
-        self._file_queue = file_queue
+        self._root         = root
+        self._try_show_fn  = try_show_fn
+        self._timers       = {}   # filename.lower() -> Timer (debounce)
+        self._timers_lock  = threading.Lock()
+
+    def _schedule(self, path: Path):
+        if path.suffix.lower() == FILE_EXTENSION:
+            key = path.name.lower()
+            with self._timers_lock:
+                old = self._timers.pop(key, None)
+                if old:
+                    old.cancel()
+                t = threading.Timer(
+                    COPY_SETTLE_DELAY,
+                    lambda p=path: self._root.after(0, self._try_show_fn, p)
+                )
+                self._timers[key] = t
+                t.start()
 
     def on_created(self, event):
-        if event.is_directory:
-            return
-        path = Path(event.src_path)
-        if path.suffix.lower() == FILE_EXTENSION:
-            threading.Timer(COPY_SETTLE_DELAY, self._enqueue, args=[path]).start()
+        if not event.is_directory:
+            self._schedule(Path(event.src_path))
 
-    def _enqueue(self, path):
-        if path.exists():
-            self._file_queue.put(path)
+    def on_modified(self, event):
+        if not event.is_directory:
+            self._schedule(Path(event.src_path))
+
+    def on_moved(self, event):
+        if not event.is_directory:
+            self._schedule(Path(event.dest_path))
 
 
 # ── Launcher / config window ──────────────────────────────────────────────────
@@ -269,6 +295,7 @@ class RenamePopup(tk.Toplevel):
         self.grab_set()
         self.attributes("-topmost", True)
         self.focus_force()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         self.building_var    = tk.StringVar(value="DG")
         self.level_var       = tk.StringVar(value="UG")
@@ -365,15 +392,18 @@ class RenamePopup(tk.Toplevel):
         # Buttons
         btn_frame = tk.Frame(body)
         btn_frame.grid(row=12, column=0, columnspan=4, sticky="e", pady=(4, 0))
-        tk.Button(btn_frame, text="Skip (keep original name)",
-                  font=("Segoe UI", 9), fg="#666", relief="flat",
-                  cursor="hand2", command=self._skip).pack(side="left", padx=(0, 8))
         tk.Button(btn_frame, text="  Rename & Move  ",
                   font=("Segoe UI", 10, "bold"),
                   bg="#1a3a5c", fg="white",
                   activebackground="#2a5a8c", activeforeground="white",
                   relief="flat", cursor="hand2", padx=10, pady=4,
-                  command=self._rename).pack(side="left")
+                  command=self._rename).pack(side="left", padx=(0, 8))
+        tk.Button(btn_frame, text="  Cancel  ",
+                  font=("Segoe UI", 10, "bold"),
+                  bg="#8b0000", fg="white",
+                  activebackground="#a00000", activeforeground="white",
+                  relief="flat", cursor="hand2", padx=10, pady=4,
+                  command=self._cancel).pack(side="left")
 
     def _on_building_change(self):
         if self.building_var.get() == "SSB":
@@ -443,10 +473,92 @@ class RenamePopup(tk.Toplevel):
         self.on_done(renamed=True)
         self.destroy()
 
-    def _skip(self):
-        print(f"[Skipped]  {self.filepath.name}")
+    def _cancel(self):
+        if messagebox.askyesno("Confirm Delete",
+                f"Are you sure you want to delete this file?\n\n{self.filepath.name}",
+                parent=self):
+            try:
+                self.filepath.unlink()
+                print(f"[Deleted]  {self.filepath.name}")
+            except OSError as e:
+                messagebox.showerror("Delete Failed", str(e), parent=self)
+                return
+        # Always release the lock and close — whether file was deleted or skipped
         self.on_done(renamed=False)
         self.destroy()
+
+    def _on_close(self):
+        """Window X-button handler — treat as skip (file stays, watcher unlocks)."""
+        self.on_done(renamed=False)
+        self.destroy()
+
+
+# ── Detection prompt (replaces messagebox.askyesno) ──────────────────────────
+
+class DetectedPrompt(tk.Toplevel):
+    """Non-blocking 'New file detected — rename now?' prompt.
+
+    Uses grab_set() for modal behavior and callback-driven buttons
+    instead of wait_window(), so it never pumps the Tk event loop
+    and cannot cause re-entrant _try_show calls.
+    """
+    def __init__(self, parent, filename, on_yes, on_no):
+        super().__init__(parent)
+        self.on_yes = on_yes
+        self.on_no  = on_no
+
+        self.title("New File Detected")
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+        self.grab_set()
+        self.focus_force()
+        self.protocol("WM_DELETE_WINDOW", self._decline)
+
+        hdr = tk.Frame(self, bg="#1a3a5c")
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="  New TFLX File Detected",
+                 bg="#1a3a5c", fg="white",
+                 font=("Segoe UI", 11, "bold"),
+                 pady=10, padx=12).pack(anchor="w")
+
+        body = tk.Frame(self, padx=20, pady=14)
+        body.pack(fill="both", expand=True)
+
+        tk.Label(body, text=filename,
+                 font=("Consolas", 10), fg="#333",
+                 wraplength=380).pack(pady=(0, 14))
+
+        tk.Label(body, text="Would you like to rename this file?",
+                 font=("Segoe UI", 10)).pack(pady=(0, 14))
+
+        btn_row = tk.Frame(body)
+        btn_row.pack()
+        tk.Button(btn_row, text="  Yes — Rename  ",
+                  font=("Segoe UI", 10, "bold"),
+                  bg="#1a3a5c", fg="white",
+                  activebackground="#2a5a8c", activeforeground="white",
+                  relief="flat", cursor="hand2", padx=10, pady=4,
+                  command=self._accept).pack(side="left", padx=(0, 10))
+        tk.Button(btn_row, text="  No — Skip  ",
+                  font=("Segoe UI", 10),
+                  relief="flat", cursor="hand2", padx=10, pady=4,
+                  command=self._decline).pack(side="left")
+
+        # Center on screen
+        self.update_idletasks()
+        w, h = self.winfo_width(), self.winfo_height()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+
+    def _accept(self):
+        self.grab_release()
+        self.destroy()
+        self.on_yes()
+
+    def _decline(self):
+        self.grab_release()
+        self.destroy()
+        self.on_no()
 
 
 # ── Main watcher app ──────────────────────────────────────────────────────────
@@ -456,13 +568,14 @@ class WatcherApp:
         self.root          = root
         self.watch_folders = watch_folders
         self.dump_folder   = dump_folder
-        self._file_queue   = queue.Queue()
         self._popup_open   = False
+        self._shown        = set()   # filenames already shown this session
+        self._pending      = []      # paths that arrived while popup was open
         self._start_observers()
-        self._poll_queue()
 
     def _start_observers(self):
-        handler = TFLXHandler(self._file_queue)
+        print(f"[Version]  {VERSION}")
+        handler = TFLXHandler(self.root, self._try_show)
         for folder in self.watch_folders:
             watch_path = Path(folder)
             watch_path.mkdir(parents=True, exist_ok=True)
@@ -472,27 +585,49 @@ class WatcherApp:
             observer.start()
             print(f"[Watching] {watch_path}")
 
-    def _poll_queue(self):
-        if not self._popup_open:
-            try:
-                filepath = self._file_queue.get_nowait()
-                self._popup_open = True
-                answer = messagebox.askyesno(
-                    "New TFLX File Detected",
-                    f"New file detected:\n\n{filepath.name}\n\nWould you like to rename and move it?",
-                )
-                if answer:
-                    RenamePopup(self.root, filepath, self.dump_folder,
-                                on_done=lambda renamed: self._on_popup_done())
-                else:
-                    print(f"[Ignored]  {filepath.name}")
-                    self._on_popup_done()
-            except queue.Empty:
-                pass
-        self.root.after(500, self._poll_queue)
+    def _try_show(self, path: Path):
+        """Called on the Tkinter main thread. Show a popup or discard the path."""
+        if not path.exists():
+            print(f"[Skip]     {path.name} — file no longer exists")
+            return
+        key = path.name.lower()
+        if key in self._shown:
+            print(f"[Skip]     {path.name} — already shown")
+            return
+        if self._popup_open:
+            print(f"[Defer]    {path.name} — popup open, queuing")
+            self._pending.append(path)
+            return
+        self._shown.add(key)
+        self._popup_open = True
+        print(f"[Prompt]   asking about {path.name}")
+        # Delay window creation by one event cycle. This lets any remaining
+        # after(0, _try_show) calls in the Tk queue run and get blocked by
+        # _popup_open BEFORE Toplevel.__init__ flushes events internally.
+        self.root.after(1, lambda: DetectedPrompt(self.root, path.name,
+            on_yes=lambda: self._open_rename(path),
+            on_no=lambda: self._decline_rename(path)))
+
+    def _open_rename(self, path):
+        """User accepted — open the full rename popup."""
+        print(f"[Popup]    opening for {path.name}")
+        self.root.after(1, lambda: RenamePopup(self.root, path, self.dump_folder,
+                    on_done=lambda renamed: self._on_popup_done()))
+
+    def _decline_rename(self, path):
+        """User declined — skip this file, unlock the watcher."""
+        print(f"[Skip]     {path.name} — user declined")
+        self._on_popup_done()
 
     def _on_popup_done(self):
         self._popup_open = False
+        print(f"[Done]     popup closed")
+        # Show the next pending file, if any, after skipping already-shown names
+        while self._pending:
+            nxt = self._pending.pop(0)
+            if nxt.name.lower() not in self._shown:
+                self.root.after(100, self._try_show, nxt)
+                break
 
     def run(self):
         self.root.mainloop()
@@ -510,7 +645,6 @@ def check_dependencies():
 
 if __name__ == "__main__":
     check_dependencies()
-    import queue
     root = tk.Tk()
     root.withdraw()
     LauncherWindow(root)
