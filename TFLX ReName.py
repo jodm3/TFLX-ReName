@@ -1,7 +1,7 @@
 """
 TFLX File Watcher & Rename Tool
 Watches one or more folders for new .tflx files and prompts for standardized renaming.
-Naming convention: Building-Level-Area-Tablet-MMDDYY_HHMM.tflx
+Naming convention: Building-Level-Area-Tablet-[Purpose]-MMDDYY_HHMM.tflx
 After rename, moves file to: DumpFolder/Building/Level/Area/
 Config saved to tflx_watcher_config.json next to this script.
 """
@@ -27,6 +27,7 @@ LEVELS    = ["UG"] + [f"{n:02d}" for n in range(1, 24)]
 BUILDINGS = ["DG", "SSB"]
 AREAS     = ["Tower", "Podium"]
 TABLETS   = ["T1", "T2", "T3", "T4"]
+PURPOSES  = ["None", "Hangers", "Wall Penetrations", "Floor Penetrations", "Equipment", "Custom"]
 
 
 # ── Config helpers ────────────────────────────────────────────────────────────
@@ -195,12 +196,18 @@ class LauncherWindow:
 
         ttk.Separator(body, orient="horizontal").pack(fill="x", pady=12)
 
-        tk.Button(body, text="  Start Watching  ",
+        bottom_row = tk.Frame(body)
+        bottom_row.pack(fill="x")
+        tk.Button(bottom_row, text="About",
+                  font=("Segoe UI", 9), relief="flat", bg="#e8edf2",
+                  cursor="hand2", padx=8, pady=3,
+                  command=self._show_about).pack(side="left")
+        tk.Button(bottom_row, text="  Start Watching  ",
                   font=("Segoe UI", 11, "bold"),
                   bg="#1a3a5c", fg="white",
                   activebackground="#2a5a8c", activeforeground="white",
                   relief="flat", cursor="hand2", padx=12, pady=6,
-                  command=self._start).pack(anchor="e")
+                  command=self._start).pack(side="right")
 
     def _refresh_list(self):
         self.listbox.delete(0, tk.END)
@@ -273,6 +280,38 @@ class LauncherWindow:
         self.root.withdraw()
         WatcherApp(self.root, self._folders, dump).run()
 
+    def _show_about(self):
+        about = tk.Toplevel(self.root)
+        about.title("About")
+        about.resizable(False, False)
+        about.attributes("-topmost", True)
+        about.grab_set()
+
+        hdr = tk.Frame(about, bg="#1a3a5c")
+        hdr.pack(fill="x")
+        tk.Label(hdr, text="  TFLX File Watcher",
+                 bg="#1a3a5c", fg="white",
+                 font=("Segoe UI", 13, "bold"),
+                 pady=12, padx=12).pack(anchor="w")
+
+        body = tk.Frame(about, padx=20, pady=14)
+        body.pack(fill="both", expand=True)
+        tk.Label(body, text=f"Version: {VERSION}",
+                 font=("Segoe UI", 10, "bold")).pack(anchor="w")
+        tk.Label(body, text="Watches folders for new .tflx files and\n"
+                            "prompts for standardized renaming.",
+                 font=("Segoe UI", 9), fg="#555",
+                 justify="left").pack(anchor="w", pady=(8, 12))
+        tk.Button(body, text="  OK  ",
+                  font=("Segoe UI", 9), relief="flat", bg="#e8edf2",
+                  cursor="hand2", padx=8, pady=3,
+                  command=about.destroy).pack(anchor="e")
+
+        about.update_idletasks()
+        w, h = about.winfo_width(), about.winfo_height()
+        sw, sh = about.winfo_screenwidth(), about.winfo_screenheight()
+        about.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
+
     def _center(self):
         self.root.update_idletasks()
         w, h = self.root.winfo_width(), self.root.winfo_height()
@@ -297,12 +336,14 @@ class RenamePopup(tk.Toplevel):
         self.focus_force()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        self.building_var    = tk.StringVar(value="DG")
-        self.level_var       = tk.StringVar(value="UG")
-        self.area_var        = tk.StringVar(value="Tower")
-        self.tablet_var      = tk.StringVar(value="T1")
-        self.preview_var     = tk.StringVar()
-        self.dest_path_var   = tk.StringVar()
+        self.building_var       = tk.StringVar(value="DG")
+        self.level_var          = tk.StringVar(value="UG")
+        self.area_var           = tk.StringVar(value="Tower")
+        self.tablet_var         = tk.StringVar(value="T1")
+        self.purpose_var        = tk.StringVar(value="None")
+        self.custom_purpose_var = tk.StringVar()
+        self.preview_var        = tk.StringVar()
+        self.dest_path_var      = tk.StringVar()
 
         self._build_ui()
         self._update_preview()
@@ -324,19 +365,21 @@ class RenamePopup(tk.Toplevel):
         body.pack(fill="both", expand=True)
 
         tk.Label(body, text="Detected file:", font=("Segoe UI", 9, "bold"),
-                 anchor="w").grid(row=0, column=0, columnspan=4, sticky="w")
+                 anchor="w").grid(row=0, column=0, columnspan=5, sticky="w")
         tk.Label(body, text=self.filepath.name,
                  font=("Consolas", 9), fg="#555",
                  wraplength=420, anchor="w").grid(
-                 row=1, column=0, columnspan=4, sticky="w", pady=(0, 10))
+                 row=1, column=0, columnspan=5, sticky="w", pady=(0, 10))
 
         ttk.Separator(body, orient="horizontal").grid(
-            row=2, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+            row=2, column=0, columnspan=5, sticky="ew", pady=(0, 10))
 
         for col, label in enumerate(["Building", "Level", "Area", "Tablet"]):
             tk.Label(body, text=label, font=("Segoe UI", 9, "bold"),
                      anchor="w").grid(row=3, column=col, sticky="w",
                                       padx=(0 if col == 0 else 14, 0))
+        tk.Label(body, text="Purpose", font=("Segoe UI", 9, "bold"),
+                 anchor="w").grid(row=3, column=4, sticky="w", padx=(14, 0))
 
         bld_frame = tk.Frame(body)
         bld_frame.grid(row=4, column=0, sticky="nw", pady=(4, 0))
@@ -362,11 +405,23 @@ class RenamePopup(tk.Toplevel):
                            value=t, font=("Segoe UI", 10),
                            command=self._update_preview).pack(anchor="w")
 
+        purpose_frame = tk.Frame(body)
+        purpose_frame.grid(row=4, column=4, sticky="nw", padx=(14, 0), pady=(4, 0))
+        self.purpose_cb = ttk.Combobox(purpose_frame, textvariable=self.purpose_var,
+                                       values=PURPOSES, state="readonly", width=17)
+        self.purpose_cb.pack(anchor="w")
+        self.purpose_cb.bind("<<ComboboxSelected>>", lambda _: self._on_purpose_change())
+        self.custom_entry = tk.Entry(purpose_frame, textvariable=self.custom_purpose_var,
+                                     font=("Consolas", 9), width=18)
+        self.custom_entry.pack(anchor="w", pady=(6, 0))
+        self.custom_entry.pack_forget()
+        self.custom_purpose_var.trace_add("write", lambda *_: self._update_preview())
+
         # Timestamp
         ttk.Separator(body, orient="horizontal").grid(
-            row=5, column=0, columnspan=4, sticky="ew", pady=(14, 8))
+            row=5, column=0, columnspan=5, sticky="ew", pady=(14, 8))
         ts_frame = tk.Frame(body)
-        ts_frame.grid(row=6, column=0, columnspan=4, sticky="w")
+        ts_frame.grid(row=6, column=0, columnspan=5, sticky="w")
         tk.Label(ts_frame, text="Timestamp:",
                  font=("Segoe UI", 9, "bold")).pack(side="left")
         tk.Label(ts_frame, text=f"  {self._timestamp}  (captured at popup open)",
@@ -374,24 +429,24 @@ class RenamePopup(tk.Toplevel):
 
         # Preview filename
         ttk.Separator(body, orient="horizontal").grid(
-            row=7, column=0, columnspan=4, sticky="ew", pady=(10, 6))
+            row=7, column=0, columnspan=5, sticky="ew", pady=(10, 6))
         tk.Label(body, text="New filename:", font=("Segoe UI", 9, "bold"),
-                 anchor="w").grid(row=8, column=0, columnspan=4, sticky="w")
+                 anchor="w").grid(row=8, column=0, columnspan=5, sticky="w")
         tk.Label(body, textvariable=self.preview_var,
                  font=("Consolas", 11, "bold"), fg="#1a3a5c").grid(
-                 row=9, column=0, columnspan=4, sticky="w", pady=(2, 6))
+                 row=9, column=0, columnspan=5, sticky="w", pady=(2, 6))
 
         # Destination path
         tk.Label(body, text="Destination:", font=("Segoe UI", 9, "bold"),
-                 anchor="w").grid(row=10, column=0, columnspan=4, sticky="w")
+                 anchor="w").grid(row=10, column=0, columnspan=5, sticky="w")
         tk.Label(body, textvariable=self.dest_path_var,
                  font=("Consolas", 8), fg="#555",
                  wraplength=420, anchor="w").grid(
-                 row=11, column=0, columnspan=4, sticky="w", pady=(2, 10))
+                 row=11, column=0, columnspan=5, sticky="w", pady=(2, 10))
 
         # Buttons
         btn_frame = tk.Frame(body)
-        btn_frame.grid(row=12, column=0, columnspan=4, sticky="e", pady=(4, 0))
+        btn_frame.grid(row=12, column=0, columnspan=5, sticky="e", pady=(4, 0))
         tk.Button(btn_frame, text="  Rename & Move  ",
                   font=("Segoe UI", 10, "bold"),
                   bg="#1a3a5c", fg="white",
@@ -405,6 +460,15 @@ class RenamePopup(tk.Toplevel):
                   relief="flat", cursor="hand2", padx=10, pady=4,
                   command=self._cancel).pack(side="left")
 
+    def _on_purpose_change(self):
+        if self.purpose_var.get() == "Custom":
+            self.custom_entry.pack(anchor="w", pady=(6, 0))
+            self.custom_entry.focus_set()
+        else:
+            self.custom_entry.pack_forget()
+            self.custom_purpose_var.set("")
+        self._update_preview()
+
     def _on_building_change(self):
         if self.building_var.get() == "SSB":
             self.area_cb.configure(state="disabled")
@@ -415,15 +479,30 @@ class RenamePopup(tk.Toplevel):
                 self.area_var.set("Tower")
         self._update_preview()
 
+    def _get_purpose_tag(self):
+        purpose = self.purpose_var.get()
+        if purpose == "None":
+            return ""
+        if purpose == "Custom":
+            custom = self.custom_purpose_var.get().strip()
+            return custom.replace(" ", "_") if custom else ""
+        return purpose.replace(" ", "_")
+
     def _build_new_name(self):
         building = self.building_var.get()
         level    = self.level_var.get()
         area     = self.area_var.get()
         tablet   = self.tablet_var.get()
+        purpose  = self._get_purpose_tag()
         ts       = self._timestamp
         if building == "DG" and area:
-            return f"{building}-{level}-{area}-{tablet}-{ts}.tflx"
-        return f"{building}-{level}-{tablet}-{ts}.tflx"
+            parts = [building, level, area, tablet]
+        else:
+            parts = [building, level, tablet]
+        if purpose:
+            parts.append(purpose)
+        parts.append(ts)
+        return "-".join(parts) + ".tflx"
 
     def _build_dest_path(self):
         """Returns the full destination folder path in the dump directory."""
@@ -571,7 +650,9 @@ class WatcherApp:
         self._popup_open   = False
         self._shown        = set()   # filenames already shown this session
         self._pending      = []      # paths that arrived while popup was open
+        self._observers    = []
         self._start_observers()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_quit)
 
     def _start_observers(self):
         print(f"[Version]  {VERSION}")
@@ -583,7 +664,16 @@ class WatcherApp:
             observer.schedule(handler, str(watch_path), recursive=True)
             observer.daemon = True
             observer.start()
+            self._observers.append(observer)
             print(f"[Watching] {watch_path}")
+
+    def _on_quit(self):
+        print("[Shutdown] Stopping observers...")
+        for obs in self._observers:
+            obs.stop()
+        for obs in self._observers:
+            obs.join(timeout=3)
+        self.root.destroy()
 
     def _try_show(self, path: Path):
         """Called on the Tkinter main thread. Show a popup or discard the path."""
